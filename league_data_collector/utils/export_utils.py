@@ -409,6 +409,136 @@ def _get_participant_info(participant: Dict, match_duration: int, is_main_player
         'team_position': stats['team_position']
     }
 
+def get_gold_lead_at_time(timeline: MatchTimeline, minutes: int) -> Optional[Dict[int, Dict[str, int]]]:
+    """Calculate the gold values and lead for each team at a specific minute.
+    
+    Args:
+        timeline: The MatchTimeline object containing the timeline data
+        minutes: The minute mark to get gold data for (e.g., 5, 10, 15)
+        
+    Returns:
+        Dict with team_id as key and dict containing gold values and lead,
+        or None if data is not available
+    """
+    if not timeline or not timeline.participant_frames:
+        return None
+        
+    # Convert minutes to milliseconds
+    target_time = minutes * 60 * 1000
+    
+    # Find the frame closest to the target time
+    closest_time = None
+    min_diff = float('inf')
+    
+    for timestamp in timeline.participant_frames.keys():
+        timestamp_ms = int(timestamp)
+        diff = abs(timestamp_ms - target_time)
+        if diff < min_diff:
+            min_diff = diff
+            closest_time = timestamp_ms
+    
+    # If the closest frame is too far from the target time, return None
+    if min_diff > 90 * 1000:  # More than 1.5 minutes difference
+        return None
+    
+    # Get the participant frames for the closest time
+    frames = timeline.participant_frames.get(str(closest_time), {})
+    if not frames:
+        return None
+    
+    # Calculate total gold for each team
+    team_gold = {100: 0, 200: 0}
+    
+    for participant_id, frame in frames.items():
+        if not isinstance(participant_id, str) or not participant_id.isdigit():
+            continue
+            
+        participant_id = int(participant_id)
+        team_id = 100 if participant_id <= 5 else 200  # Participants 1-5 are team 100, 6-10 are team 200
+        team_gold[team_id] += frame.get('totalGold', 0)
+    
+    # Calculate gold values and leads
+    result = {
+        100: {
+            'gold': team_gold[100],
+            'lead': team_gold[100] - team_gold[200],
+            'timestamp': closest_time
+        },
+        200: {
+            'gold': team_gold[200],
+            'lead': team_gold[200] - team_gold[100],
+            'timestamp': closest_time
+        }
+    }
+    
+    return result
+
+def get_gold_leads_at_intervals(timeline: MatchTimeline, interval: int = 1, max_minutes: int = 30) -> Dict[int, Dict[int, Dict[str, int]]]:
+    """Get gold leads at regular intervals throughout the match.
+    
+    Args:
+        timeline: The MatchTimeline object containing the timeline data
+        interval: Interval in minutes (default: 1 for minute-by-minute)
+        max_minutes: Maximum match time in minutes (default: 30)
+        
+    Returns:
+        Dict with minute marks as keys and gold data as values
+    """
+    gold_leads = {}
+    
+    # Get all available timestamps from the timeline
+    if not timeline or not timeline.participant_frames:
+        return {}
+        
+    # Get all timestamps and sort them
+    all_timestamps = sorted([int(ts) for ts in timeline.participant_frames.keys()])
+    if not all_timestamps:
+        return {}
+        
+    # Convert max_minutes to milliseconds
+    max_time_ms = max_minutes * 60 * 1000
+    
+    # For each minute, find the closest frame
+    for minute in range(1, max_minutes + 1, interval):
+        target_time = minute * 60 * 1000  # Convert to milliseconds
+        if target_time > max_time_ms:
+            continue
+            
+        # Find the closest timestamp to our target time
+        closest_ts = min(all_timestamps, key=lambda x: abs(x - target_time))
+        
+        # Only use if within 30 seconds of target time
+        if abs(closest_ts - target_time) <= 30000:  # 30 seconds
+            # Get the data for this timestamp
+            frames = timeline.participant_frames.get(str(closest_ts), {})
+            if not frames:
+                continue
+                
+            # Calculate team gold
+            team_gold = {100: 0, 200: 0}
+            for participant_id, frame in frames.items():
+                if not isinstance(participant_id, str) or not participant_id.isdigit():
+                    continue
+                participant_id = int(participant_id)
+                team_id = 100 if participant_id <= 5 else 200
+                team_gold[team_id] += frame.get('totalGold', 0)
+                
+            # Store the data
+            gold_leads[minute] = {
+                100: {
+                    'gold': team_gold[100],
+                    'lead': team_gold[100] - team_gold[200],
+                    'timestamp': closest_ts
+                },
+                200: {
+                    'gold': team_gold[200],
+                    'lead': team_gold[200] - team_gold[100],
+                    'timestamp': closest_ts
+                }
+            }
+    
+    return gold_leads
+
 def _get_match_info(match: Dict) -> Dict:
     """Extract and format match information."""
     from datetime import datetime
@@ -497,6 +627,11 @@ def export_match_data(session: Session, output_dir: str = 'match_exports',
             filename = f"match_{date_str}_{safe_match_id}.csv"
             filepath = os.path.join(output_dir, filename)
             
+            # Get gold leads at 1-minute intervals
+            gold_leads = {}
+            if match.timeline and match.timeline.participant_frames:
+                gold_leads = get_gold_leads_at_intervals(match.timeline, interval=1, max_minutes=30)
+            
             # Get team information
             teams = {}
             for team in match.teams:
@@ -510,6 +645,7 @@ def export_match_data(session: Session, output_dir: str = 'match_exports',
                         'baron_kills': team.baron_kills or 0,
                         'dragon_kills': team.dragon_kills or 0,
                         'rift_herald_kills': team.rift_herald_kills or 0,
+                        'gold_leads': gold_leads,
                     },
                     'participants': []
                 }
@@ -560,17 +696,133 @@ def export_match_data(session: Session, output_dir: str = 'match_exports',
                     ['Duration', f"{int(match.game_duration // 60)}m {int(match.game_duration % 60)}s" if match.game_duration else 'Unknown'],
                     ['Version', match.game_version or 'Unknown']
                 ]
+                
+                # Add gold leads at minute intervals if available
+                if gold_leads:
+                    # Add a section header
+                    match_info.append(['', ''])
+                    match_info.append(['GOLD LEAD PER MINUTE', ''])
+                    
+                    # Group by team for easier display
+                    team_100_gold = []
+                    team_200_gold = []
+                    
+                    for minute, leads in sorted(gold_leads.items()):
+                        team_100 = leads[100]
+                        team_200 = leads[200]
+                        
+                        # Add to team-specific lists
+                        team_100_gold.append(f"{minute}: {team_100['gold']:,}g ({team_100['lead']:+,}g)")
+                        team_200_gold.append(f"{minute}: {team_200['gold']:,}g ({team_200['lead']:+,}g)")
+                    
+                    # Add team gold progress to match info - split into multiple lines if needed
+                    max_line_length = 100
+                    team_100_chunks = []
+                    current_chunk = []
+                    current_length = 0
+                    
+                    for entry in team_100_gold:
+                        if current_length + len(entry) + 2 > max_line_length and current_chunk:
+                            team_100_chunks.append(' | '.join(current_chunk))
+                            current_chunk = []
+                            current_length = 0
+                        current_chunk.append(entry)
+                        current_length += len(entry) + 2  # +2 for ' | ' separator
+                    
+                    if current_chunk:
+                        team_100_chunks.append(' | '.join(current_chunk))
+                    
+                    # Add team 100 gold data
+                    for i, chunk in enumerate(team_100_chunks):
+                        if i == 0:
+                            match_info.append(['Team 100 Gold', chunk])
+                        else:
+                            match_info.append(['', chunk])
+                    
+                    # Same for team 200
+                    team_200_chunks = []
+                    current_chunk = []
+                    current_length = 0
+                    
+                    for entry in team_200_gold:
+                        if current_length + len(entry) + 2 > max_line_length and current_chunk:
+                            team_200_chunks.append(' | '.join(current_chunk))
+                            current_chunk = []
+                            current_length = 0
+                        current_chunk.append(entry)
+                        current_length += len(entry) + 2  # +2 for ' | ' separator
+                    
+                    if current_chunk:
+                        team_200_chunks.append(' | '.join(current_chunk))
+                    
+                    # Add team 200 gold data
+                    for i, chunk in enumerate(team_200_chunks):
+                        if i == 0:
+                            match_info.append(['Team 200 Gold', chunk])
+                        else:
+                            match_info.append(['', chunk])
+                    
+                    # Add a summary of key moments
+                    match_info.append(['', ''])
+                    match_info.append(['GOLD LEAD SUMMARY', ''])
+                    
+                    # Find the minute where the lead changed the most
+                    max_swing = 0
+                    max_swing_minute = 0
+                    prev_lead = 0
+                    
+                    for minute, leads in sorted(gold_leads.items()):
+                        if minute == 1:
+                            prev_lead = leads[100]['lead']
+                            continue
+                            
+                        current_lead = leads[100]['lead']
+                        swing = abs(current_lead - prev_lead)
+                        
+                        if swing > max_swing:
+                            max_swing = swing
+                            max_swing_minute = minute
+                            
+                        prev_lead = current_lead
+                    
+                    if max_swing_minute > 0:
+                        leads = gold_leads[max_swing_minute]
+                        winning_team = 100 if leads[100]['lead'] > 0 else 200
+                        match_info.append([
+                            f'Biggest Lead Change @{max_swing_minute}min',
+                            f"Team {winning_team} gained {max_swing:,}g advantage"
+                        ])
+                    
+                    # Add final gold difference
+                    if gold_leads:
+                        last_minute = max(gold_leads.keys())
+                        final_leads = gold_leads[last_minute]
+                        winning_team = 100 if final_leads[100]['lead'] > 0 else 200
+                        match_info.append([
+                            'Final Gold Difference',
+                            f"Team {winning_team} ahead by {abs(final_leads[winning_team]['lead']):,}g"
+                        ])
                 write_section('MATCH INFORMATION', match_info)
                 
                 # Teams and Participants
                 for team_id, team_data in teams.items():
                     team_info = team_data['info']
+                    # Add gold leads to team header if available
+                    gold_leads_str = ""
+                    if team_info.get('gold_leads'):
+                        # Find the latest minute with data
+                        if team_info['gold_leads']:
+                            latest_minute = max(team_info['gold_leads'].keys())
+                            lead = team_info['gold_leads'][latest_minute][team_id]['lead']
+                            gold_leads_str = f" | Gold @{latest_minute}: {lead:+,}g"
+                        
                     team_header = (
                         f"TEAM {team_id} ({team_info['win']}): "
                         f"Towers: {team_info['tower_kills']} | "
                         f"Dragons: {team_info['dragon_kills']} | "
                         f"Barons: {team_info['baron_kills']} | "
                         f"Heralds: {team_info['rift_herald_kills']}"
+                        f"{gold_leads_str}"
                     )
                     
                     writer.writerow([team_header])
