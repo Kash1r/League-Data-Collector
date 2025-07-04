@@ -110,24 +110,31 @@ def setup_argparse() -> argparse.ArgumentParser:
     # DB stats
     db_stats_parser = db_subparsers.add_parser('stats', help='Show database statistics')
     
-    # Export commands
-    export_parser = subparsers.add_parser('export', help='Export database to CSV')
-    export_subparsers = export_parser.add_subparsers(dest='export_type', help='Export type')
+    # Export subcommand
+    export_parser = subparsers.add_parser('export', help='Export data to various formats')
+    export_subparsers = export_parser.add_subparsers(dest='export_type', required=True)
     
-    # Export tables
-    tables_parser = export_subparsers.add_parser('tables', help='Export database tables to CSV')
-    tables_parser.add_argument(
+    # Export all tables
+    export_all_parser = export_subparsers.add_parser('all', help='Export all database tables to CSV')
+    export_all_parser.add_argument(
         '--output-dir',
         type=str,
         default='exports',
-        help='Directory to save CSV files (default: exports)'
+        help='Output directory for CSV files (default: exports)'
     )
-    tables_parser.add_argument(
-        '--table',
+    
+    # Export specific table
+    export_table_parser = export_subparsers.add_parser('table', help='Export a specific table to CSV')
+    export_table_parser.add_argument(
+        'table',
         type=str,
-        choices=['all', 'summoners', 'matches', 'participants', 'teams', 'timelines'],
-        default='all',
-        help='Which table to export (default: all)'
+        help='Name of the table to export (e.g., summoners, matches, participants)'
+    )
+    export_table_parser.add_argument(
+        '--output-dir',
+        type=str,
+        default='exports',
+        help='Output directory for CSV file (default: exports)'
     )
     
     # Export matches
@@ -139,6 +146,21 @@ def setup_argparse() -> argparse.ArgumentParser:
         help='Directory to save match CSV files (default: match_exports)'
     )
     matches_parser.add_argument(
+        '--summoner',
+        type=str,
+        help='Summoner name to filter matches (optional)'
+    )
+    
+    # Export objectives and gold leads
+    objectives_parser = export_subparsers.add_parser('objectives', 
+        help='Export gold leads and objective data for matches')
+    objectives_parser.add_argument(
+        '--output-dir',
+        type=str,
+        default='objective_exports',
+        help='Directory to save objective CSV files (default: objective_exports)'
+    )
+    objectives_parser.add_argument(
         '--summoner',
         type=str,
         help='Summoner name to filter matches (optional)'
@@ -239,69 +261,81 @@ def handle_db_operations(args) -> None:
 def export_data(args) -> None:
     """Export database data to CSV files."""
     from .utils.export_utils import export_all_tables, export_to_csv, export_match_data
+    from .utils.objective_export_utils import export_objectives_and_gold
     from .database import SessionLocal
     
     session = SessionLocal()
     
     try:
-        if hasattr(args, 'export_type') and args.export_type == 'matches':
-            # Handle match-based export
-            logger.info(f"Exporting match data to directory: {args.output_dir}")
-            if args.summoner:
-                logger.info(f"Filtering matches for summoner: {args.summoner}")
-            
-            results = export_match_data(
-                session=session,
-                output_dir=args.output_dir,
-                summoner_name=args.summoner
-            )
-            
-            # Log results
-            success_count = sum(1 for r in results.values() if not r.startswith('Error'))
-            error_count = len(results) - success_count
-            
-            if success_count > 0:
-                logger.info(f"Successfully exported {success_count} matches")
-            if error_count > 0:
-                logger.warning(f"Failed to export {error_count} matches")
-            
-            logger.info(f"Export completed. Files saved to: {os.path.abspath(args.output_dir)}")
-            
-        else:
-            # Handle table-based export
-            from .models import Summoner, Match, Participant, Team, MatchTimeline
-            model_map = {
-                'summoners': Summoner,
-                'matches': Match,
-                'participants': Participant,
-                'teams': Team,
-                'timelines': MatchTimeline
-            }
-            
-            if args.table == 'all':
-                logger.info(f"Exporting all tables to directory: {args.output_dir}")
-                results = export_all_tables(session, args.output_dir)
+        if hasattr(args, 'export_type'):
+            if args.export_type == 'matches':
+                # Handle match-based export
+                logger.info(f"Exporting match data to directory: {args.output_dir}")
+                if args.summoner:
+                    logger.info(f"Filtering matches for summoner: {args.summoner}")
+                
+                results = export_match_data(
+                    session=session,
+                    output_dir=args.output_dir,
+                    summoner_name=args.summoner
+                )
                 
                 # Log results
-                for model_name, result in results.items():
-                    if isinstance(result, str) and result.startswith('Error'):
-                        logger.error(result)
+                for match_id, result in results.items():
+                    if result.startswith('Error'):
+                        logger.error(f"{match_id}: {result}")
                     else:
-                        logger.info(f"Exported {model_name} to {result}")
+                        logger.info(f"Exported {match_id} to {result}")
+            
+            elif args.export_type == 'objectives':
+                # Handle objectives export
+                logger.info(f"Exporting objectives data to directory: {args.output_dir}")
+                if args.summoner:
+                    logger.info(f"Filtering matches for summoner: {args.summoner}")
                 
-                logger.info("Export completed successfully")
-            else:
-                model = model_map.get(args.table)
-                if not model:
-                    logger.error(f"Unknown table: {args.table}")
-                    return
+                results = export_objectives_and_gold(
+                    session=session,
+                    output_dir=args.output_dir,
+                    summoner_name=args.summoner
+                )
+                
+                # Log results
+                for match_id, result in results.items():
+                    if result.startswith('Error'):
+                        logger.error(f"{match_id}: {result}")
+                    else:
+                        logger.info(f"Exported objectives for {match_id} to {result}")
+            
+            elif args.export_type == 'table':
+                # Handle table-based export
+                if hasattr(args, 'table') and args.table != 'all':
+                    from ..models import Base
+                    model_dict = {cls.__tablename__: cls for cls in Base._decl_class_registry.values() 
+                                if hasattr(cls, '__tablename__')}
                     
-                logger.info(f"Exporting {args.table} to directory: {args.output_dir}")
-                try:
-                    filepath = export_to_csv(session, model, args.output_dir)
-                    logger.info(f"Exported {args.table} to {filepath}")
-                except Exception as e:
-                    logger.error(f"Error exporting {args.table}: {str(e)}")
+                    if args.table not in model_dict:
+                        logger.error(f"Unknown table: {args.table}")
+                        logger.info(f"Available tables: {', '.join(model_dict.keys())}")
+                        return
+                        
+                    logger.info(f"Exporting {args.table} to directory: {args.output_dir}")
+                    try:
+                        filepath = export_to_csv(session, model_dict[args.table], args.output_dir)
+                        logger.info(f"Exported {args.table} to {filepath}")
+                    except Exception as e:
+                        logger.error(f"Error exporting {args.table}: {str(e)}")
+                else:
+                    # Export all tables
+                    logger.info(f"Exporting all tables to directory: {args.output_dir}")
+                    results = export_all_tables(session, args.output_dir)
+                    for table, result in results.items():
+                        if isinstance(result, str) and result.startswith('Error'):
+                            logger.error(f"{table}: {result}")
+                        else:
+                            logger.info(f"Exported {table} to {result}")
+            
+            else:
+                logger.error(f"Unknown export type: {args.export_type}")
     
     except Exception as e:
         logger.error(f"Error during export: {str(e)}", exc_info=args.debug)

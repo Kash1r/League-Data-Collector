@@ -55,6 +55,18 @@ python -m league_data_collector.cli --region na1 fetch "Kashir#7864" \
   --matches 20 \
   --all-participants \
   --queue 420  # Ranked Solo/Duo
+
+# Fetch only solo/duo ranked matches (queue ID 420)
+python -m league_data_collector.cli --region na1 fetch "Kashir#7864" \
+  --matches 20 \
+  --queue 420
+```
+
+### Database Management
+
+```bash
+# Reset the database (deletes all data)
+python -m league_data_collector.cli db reset
 ```
 
 ### Exporting Data
@@ -106,6 +118,22 @@ python -m league_data_collector.cli export matches [options]
 **Options:**
 - `--output-dir <dir>`: Output directory (default: 'match_exports')
 - `--summoner <name>`: Filter by summoner name
+
+#### Export Objectives and Gold Leads
+```bash
+python -m league_data_collector.cli export objectives [options]
+```
+
+**Options:**
+- `--output-dir <dir>`: Output directory (default: 'objective_exports')
+- `--summoner <name>`: Filter by summoner name
+
+This export provides detailed minute-by-minute gold leads and objective events including:
+- Gold difference between teams at each minute
+- Objective events (turrets, dragons, barons, etc.) with timestamps
+- Objective types (e.g., dragon type, turret tier)
+- Team that secured each objective
+
 
 ## 🌍 Available Regions
 
